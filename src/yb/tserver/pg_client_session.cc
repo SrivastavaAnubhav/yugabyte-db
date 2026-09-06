@@ -1151,6 +1151,7 @@ client::YBSessionPtr CreateSession(
   auto result = std::make_shared<client::YBSession>(client, deadline, clock, arena);
   result->SetForceConsistentRead(client::ForceConsistentRead::kTrue);
   result->set_allow_local_calls_in_curr_thread(false);
+  result->set_inline_local_callback_on_callback_pool(true);
   return result;
 }
 

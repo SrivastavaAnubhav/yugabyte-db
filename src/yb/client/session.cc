@@ -233,6 +233,8 @@ void FlushBatcherAsync(
     const internal::IsWithinTransactionRetry is_within_transaction_retry) {
   batcher->set_allow_local_calls_in_curr_thread(
       batcher_config.allow_local_calls_in_curr_thread);
+  batcher->set_inline_local_callback_on_callback_pool(
+      batcher_config.inline_local_callback_on_callback_pool);
   batcher->FlushAsync(
       std::bind(
           &BatcherFlushDone, batcher, _1, std::move(callback), batcher_config),
@@ -290,6 +292,10 @@ bool YBSession::allow_local_calls_in_curr_thread() const {
 
 void YBSession::set_allow_local_calls_in_curr_thread(bool flag) {
   batcher_config_.allow_local_calls_in_curr_thread = flag;
+}
+
+void YBSession::set_inline_local_callback_on_callback_pool(bool flag) {
+  batcher_config_.inline_local_callback_on_callback_pool = flag;
 }
 
 void YBSession::SetInTxnLimit(HybridTime value) {

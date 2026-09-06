@@ -187,6 +187,8 @@ AsyncRpc::AsyncRpc(
       wait_state_(ash::WaitStateInfo::CurrentWaitState()) {
   mutable_retrier()->mutable_controller()->set_allow_local_calls_in_curr_thread(
       data.allow_local_calls_in_curr_thread);
+  mutable_retrier()->mutable_controller()->set_inline_local_callback_on_callback_pool(
+      data.inline_local_callback_on_callback_pool);
 }
 
 AsyncRpc::~AsyncRpc() {

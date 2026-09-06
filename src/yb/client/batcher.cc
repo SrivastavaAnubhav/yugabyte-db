@@ -760,6 +760,7 @@ Result<std::shared_ptr<AsyncRpc>> Batcher::CreateRpc(
     .batcher = self,
     .tablet = tablet,
     .allow_local_calls_in_curr_thread = allow_local_calls_in_curr_thread,
+    .inline_local_callback_on_callback_pool = inline_local_callback_on_callback_pool_,
     .need_consistent_read = need_consistent_read,
     .skip_intents = SkipIntents(),
     .read_at_in_txn_limit = VERIFY_RESULT(GroupReadAtInTxnLimit(group)),

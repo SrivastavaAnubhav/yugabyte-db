@@ -131,6 +131,13 @@ class RpcController {
   void set_allow_local_calls_in_curr_thread(bool al) { allow_local_calls_in_curr_thread_ = al; }
   bool allow_local_calls_in_curr_thread() const { return allow_local_calls_in_curr_thread_; }
 
+  void set_inline_local_callback_on_callback_pool(bool value) {
+    inline_local_callback_on_callback_pool_ = value;
+  }
+  bool inline_local_callback_on_callback_pool() const {
+    return inline_local_callback_on_callback_pool_;
+  }
+
   // Sets where to invoke callback on receiving response to the async call.
   // For sync calls callback is always executed on reactor thread.
   void set_invoke_callback_mode(InvokeCallbackMode invoke_callback_mode) {
@@ -187,6 +194,7 @@ class RpcController {
   // Once the call is sent, it is tracked here.
   OutboundCallPtr call_;
   bool allow_local_calls_in_curr_thread_ = false;
+  bool inline_local_callback_on_callback_pool_ = false;
   InvokeCallbackMode invoke_callback_mode_ = InvokeCallbackMode::kThreadPoolNormal;
 
   std::unique_ptr<Sidecars> outbound_sidecars_;

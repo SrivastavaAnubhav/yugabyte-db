@@ -66,6 +66,7 @@ struct AsyncRpcData {
   BatcherPtr batcher;
   RemoteTablet* tablet = nullptr;
   bool allow_local_calls_in_curr_thread = false;
+  bool inline_local_callback_on_callback_pool = false;
   bool need_consistent_read = false;
   bool skip_intents = false;
   // Read this RPC's ops at the statement's in_txn_limit instead of the transaction read time.

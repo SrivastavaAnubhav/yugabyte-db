@@ -575,6 +575,15 @@ void OutboundCall::InvokeCallback(std::optional<CoarseTimePoint> now_optional) {
       << "Invoking callback on an unfinished OutboundCall: " << DebugString();
 
   if (callback_thread_pool_) {
+    if (is_local() && !controller_->allow_local_calls_in_curr_thread() &&
+        controller_->inline_local_callback_on_callback_pool() &&
+        callback_thread_pool_->OwnsThisThread()) {
+      auto self = shared_from(this);
+      self->InvokeCallbackSync(now);
+      TRACE_TO(self->trace_, "Callback called synchronously on its callback pool.");
+      return;
+    }
+
     callback_task_.SetOutboundCall(shared_from(this));
     if (callback_thread_pool_->Enqueue(&callback_task_)) {
       TRACE_TO(trace_, "Callback will be called asynchronously.");

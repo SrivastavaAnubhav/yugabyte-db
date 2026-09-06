@@ -71,6 +71,8 @@ void RpcController::Swap(RpcController* other) {
 
   std::swap(timeout_, other->timeout_);
   std::swap(allow_local_calls_in_curr_thread_, other->allow_local_calls_in_curr_thread_);
+  std::swap(
+      inline_local_callback_on_callback_pool_, other->inline_local_callback_on_callback_pool_);
   std::swap(call_, other->call_);
   std::swap(invoke_callback_mode_, other->invoke_callback_mode_);
 }
@@ -171,9 +173,13 @@ std::string RpcController::CallStateDebugString() const {
 }
 
 void RpcController::MarkCallAsFailed() {
-  std::lock_guard l(lock_);
-  if (call_) {
-    call_->SetFailed(STATUS(TimedOut, "Forced timed out detected by sender."));
+  OutboundCallPtr call;
+  {
+    std::lock_guard l(lock_);
+    call = call_;
+  }
+  if (call) {
+    call->SetFailed(STATUS(TimedOut, "Forced timed out detected by sender."));
   }
 }
 

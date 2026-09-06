@@ -2063,8 +2063,7 @@ exec_bind_message(StringInfo input_message)
 	 */
 	debug_query_string = psrc->query_string;
 
-	/* Use YbParseCommandTag to suppress error warnings. */
-	yb_command_tag = YbParseCommandTag(psrc->query_string);
+	yb_command_tag = psrc->commandTag;
 	yb_redacted_query_string = YbRedactPasswordIfExists(psrc->query_string,
 														yb_command_tag);
 	pgstat_report_activity(STATE_RUNNING, yb_redacted_query_string);

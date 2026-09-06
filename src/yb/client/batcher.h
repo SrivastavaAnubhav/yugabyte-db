@@ -246,6 +246,10 @@ class Batcher : public Runnable, public std::enable_shared_from_this<Batcher> {
 
   void set_allow_local_calls_in_curr_thread(bool flag) { allow_local_calls_in_curr_thread_ = flag; }
 
+  void set_inline_local_callback_on_callback_pool(bool flag) {
+    inline_local_callback_on_callback_pool_ = flag;
+  }
+
   bool allow_local_calls_in_curr_thread() const { return allow_local_calls_in_curr_thread_; }
 
   const std::string& proxy_uuid() const;
@@ -412,6 +416,7 @@ class Batcher : public Runnable, public std::enable_shared_from_this<Batcher> {
 
   // If true, we might allow the local calls to be run in the same IPC thread.
   bool allow_local_calls_in_curr_thread_ = true;
+  bool inline_local_callback_on_callback_pool_ = false;
 
   std::shared_ptr<yb::client::internal::AsyncRpcMetrics> async_rpc_metrics_;
 

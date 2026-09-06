@@ -214,6 +214,9 @@ class YBSession : public std::enable_shared_from_this<YBSession> {
   void set_allow_local_calls_in_curr_thread(bool flag);
   bool allow_local_calls_in_curr_thread() const;
 
+  // Inline a local RPC callback only when completion already runs on its callback pool.
+  void set_inline_local_callback_on_callback_pool(bool flag);
+
   // Sets in transaction read limit for this session.
   void SetInTxnLimit(HybridTime value);
 
@@ -252,6 +255,7 @@ class YBSession : public std::enable_shared_from_this<YBSession> {
     YBTransactionPtr transaction;
     std::shared_ptr<ConsistentReadPoint> non_transactional_read_point;
     bool allow_local_calls_in_curr_thread = true;
+    bool inline_local_callback_on_callback_pool = false;
     bool force_consistent_read = false;
     RejectionScoreSourcePtr rejection_score_source;
     int64_t leader_term = OpId::kUnknownTerm;
