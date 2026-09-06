@@ -62,6 +62,8 @@
 
 #include "yb/rpc/lightweight_message.h"
 #include "yb/rpc/rpc_context.h"
+#include "yb/rpc/rpc_header.pb.h"
+#include "yb/rpc/serialization.h"
 #include "yb/rpc/sidecars.h"
 #include "yb/rpc/scheduler.h"
 
@@ -85,6 +87,7 @@
 #include "yb/util/cast.h"
 #include "yb/util/cgroups.h"
 #include "yb/util/debug-util.h"
+#include "yb/util/dist_trace.h"
 #include "yb/util/enums.h"
 #include "yb/util/logging.h"
 #include "yb/util/lw_function.h"
@@ -158,6 +161,10 @@ DEFINE_test_flag(bool, pause_session_lock_after_release, false,
 
 DEFINE_test_flag(uint64, shared_exchange_big_response_delay_ms, 0,
     "Delay before sending response that does not fit into the shared exchange buffer.");
+
+DEFINE_test_flag(bool, perform_async_error, false,
+    "Fail every Perform request when its response is sent, i.e. after the handler has already "
+    "returned success.");
 
 #ifdef __linux__
 DECLARE_bool(enable_qos);
@@ -653,6 +660,18 @@ struct ObjectLockQueryTraits {
   static constexpr const char* kMethodName = "AcquireObjectLock";
 };
 
+// Name of the inbound shared-memory span.
+template <QueryTraitsType T>
+std::string_view SharedMemHandlerSpanName();
+template <>
+std::string_view SharedMemHandlerSpanName<PerformQueryTraits>() {
+  return "shmem yb.tserver.PgClientService.Perform";
+}
+template <>
+std::string_view SharedMemHandlerSpanName<ObjectLockQueryTraits>() {
+  return "shmem yb.tserver.PgClientService.AcquireObjectLock";
+}
+
 using ResponseSender = std::function<void()>;
 
 template <QueryTraitsType T>
@@ -950,6 +969,8 @@ class SharedExchangeQuery : public std::enable_shared_from_this<SharedExchangeQu
   // 8 bytes - timeout in milliseconds.
   // next - size of serialized AshMetadataPB protobuf (say 'x').
   // next 'x' bytes - serialized AshMetadataPB protobuf.
+  // next - size of serialized TraceContextPB protobuf (say 'y').
+  // next 'y' bytes - serialized TraceContextPB protobuf.
   // remaining bytes - serialized PgPerformRequestPB protobuf.
   template <class... Args>
   Result<RequestInfo> ParseRequest(
@@ -961,6 +982,13 @@ class SharedExchangeQuery : public std::enable_shared_from_this<SharedExchangeQu
     input += sizeof(uint64_t);
     RETURN_NOT_OK(rpc::ParseMetadataFromSharedMemory(
         &input, end - input, rpc::AnyMessagePtr(&ash_metadata_)));
+    // A zero-length blob is a single 0 byte; skip it without building the protobuf or the stream.
+    if (input < end && *input == 0) {
+      ++input;
+    } else {
+      RETURN_NOT_OK(rpc::ParseMetadataFromSharedMemory(
+          &input, end - input, rpc::AnyMessagePtr(&trace_context_.emplace())));
+    }
     RETURN_NOT_OK(req_.ParseFromSlice(Slice(input, end)));
     data_.emplace(
         std::forward<Args>(args)..., session_id, arena_, req_, resp_, sidecars_,
@@ -985,13 +1013,44 @@ class SharedExchangeQuery : public std::enable_shared_from_this<SharedExchangeQu
   }
 
   const AshMetadataPB& ash_metadata() const { return ash_metadata_; }
+  const std::optional<rpc::TraceContextPB>& trace_context() const { return trace_context_; }
+
+  void SetTraceSpan(
+      opentelemetry::nostd::shared_ptr<opentelemetry::trace::Span> trace_span) {
+    trace_span_ = std::move(trace_span);
+  }
 
  private:
+  void FinishTraceSpan(const Status& status) {
+    if (!trace_span_) {
+      return;
+    }
+    if (status.ok()) {
+      trace_span_->SetStatus(opentelemetry::trace::StatusCode::kOk);
+    } else {
+      trace_span_->SetStatus(
+          opentelemetry::trace::StatusCode::kError, status.ToUserMessage());
+    }
+    trace_span_->End();
+    trace_span_ = {};
+  }
+
   void SendResponse() {
     auto locked_session = session_.lock();
     if (!locked_session) {
       responded_ = true;
+      if (trace_span_) {
+        FinishTraceSpan(STATUS(Expired, "Pg client session expired before shared memory response"));
+      }
       return;
+    }
+
+    if constexpr (std::is_same_v<T, PerformQueryTraits>) {
+      if (PREDICT_FALSE(FLAGS_TEST_perform_async_error) &&
+          ResponseStatus(resp_).ok()) {
+        StatusToPB(STATUS(InternalError, "TEST_perform_async_error"), resp_.mutable_status());
+        sidecars_.Reset();
+      }
     }
 
     using google::protobuf::io::CodedOutputStream;
@@ -1045,18 +1104,24 @@ class SharedExchangeQuery : public std::enable_shared_from_this<SharedExchangeQu
     }
     exchange_.Respond(response_size);
     responded_ = true;
+    if (trace_span_) {
+      FinishTraceSpan(ResponseStatus(resp_));
+    }
   }
 
   ThreadSafeArenaPtr arena_ = SharedThreadSafeArena();
   std::remove_const_t<typename T::ReqPB> req_;
   typename T::RespPB resp_;
   AshMetadataPB ash_metadata_;
+  // Materialized only when the request carried a non-empty trace-context blob.
+  std::optional<rpc::TraceContextPB> trace_context_;
   rpc::Sidecars sidecars_;
   std::weak_ptr<PgClientSession> session_;
   SharedExchange& exchange_;
   EventStatsPtr stats_exchange_response_size_;
   std::atomic<bool> responded_{false};
   std::optional<QueryData<T>> data_;
+  opentelemetry::nostd::shared_ptr<opentelemetry::trace::Span> trace_span_;
 };
 
 // Returns true if a mock fully handled the shared-memory query.
@@ -1435,7 +1500,15 @@ class RpcQuery : public std::enable_shared_from_this<RpcQuery<T>> {
   }
 
  private:
-  void SendResponse() { context.RespondSuccess(); }
+  void SendResponse() {
+    if constexpr (std::is_same_v<T, PerformQueryTraits>) {
+      if (PREDICT_FALSE(FLAGS_TEST_perform_async_error)) {
+        context.RespondFailure(STATUS(InternalError, "TEST_perform_async_error"));
+        return;
+      }
+    }
+    context.RespondSuccess();
+  }
 
   QueryData<T> data_;
 };
@@ -2627,7 +2700,26 @@ class PgClientSession::Impl {
             context_.TEST_mock_service, *data, deadline))) {
       return Status::OK();
     }
-    return DoHandleSharedExchangeQuery(precondition_waiter, std::move(data), deadline);
+
+    // Start the inbound span for this shared memory request, as a child of the propagated context.
+    opentelemetry::nostd::shared_ptr<opentelemetry::trace::Span> trace_span;
+    const auto& trace_context = query.trace_context();
+    if (dist_trace::IsDistTraceEnabled() && trace_context && trace_context->has_span_id()) {
+      auto parent_context = rpc::ToSpanContext(*trace_context);
+      if (parent_context.ok()) {
+        trace_span = dist_trace::StartServerSpan(SharedMemHandlerSpanName<T>(), *parent_context);
+        if (trace_span) {
+          // Mirror the attributes the RPC inbound span carries (yb_rpc.cc), minus the ones with no
+          // shared-memory analog (rpc.call_id).
+          trace_span->SetAttribute("rpc.system", "yb_shmem");
+        }
+      }
+    }
+
+    query.SetTraceSpan(trace_span);
+    dist_trace::ScopedAdoptSpan trace_scope(trace_span);
+    const auto status = DoHandleSharedExchangeQuery(precondition_waiter, std::move(data), deadline);
+    return status;
   }
 
   template <QueryTraitsType T, class... Args>

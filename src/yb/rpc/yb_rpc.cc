@@ -29,7 +29,9 @@
 #include "yb/rpc/serialization.h"
 
 #include "yb/util/debug/trace_event.h"
+#include "yb/util/dist_trace.h"
 #include "yb/util/format.h"
+#include "yb/util/logging.h"
 #include "yb/util/result.h"
 #include "yb/util/status_format.h"
 
@@ -305,6 +307,18 @@ Status YBInboundCall::ParseFrom(const MemTrackerPtr& mem_tracker, CallData* call
   DVLOG(4) << "Parsed YBInboundCall header: " << header_.call_id;
   UpdateWaitStateInfo();
 
+  // Extract the propagated distributed-trace parent from the header, if present. The span itself is
+  // created later, when the RpcContext is constructed (CreateServerSpan). Tracing is best-effort: a
+  // malformed context is logged and dropped, never fails the RPC.
+  if (dist_trace::IsDistTraceEnabled() && !header_.trace_context.empty()) {
+    auto parsed = ParseTraceContext(header_.trace_context);
+    if (parsed.ok()) {
+      parent_span_context_ = std::move(*parsed);
+    } else {
+      YB_LOG_EVERY_N_SECS(WARNING, 5) << "Failed to parse RPC trace context: " << parsed.status();
+    }
+  }
+
   consumption_ = ScopedTrackedConsumption(mem_tracker, call_data->size());
   request_data_ = std::move(*call_data);
 
@@ -314,6 +328,28 @@ Status YBInboundCall::ParseFrom(const MemTrackerPtr& mem_tracker, CallData* call
   }
 
   return Status::OK();
+}
+
+void YBInboundCall::CreateServerSpan(std::optional<opentelemetry::trace::SpanContext> traceparent) {
+  // Remote calls supply no `traceparent` and fall back to the context parsed from the wire header;
+  // local calls pass the originating outbound span's context explicitly (there is no wire header).
+  if (!dist_trace::IsDistTraceEnabled()) {
+    return;
+  }
+  const auto& parent_context = traceparent ? traceparent : parent_span_context_;
+  if (!parent_context) {
+    return;
+  }
+  auto parsed_method = ParseRemoteMethod(header_.remote_method);
+  if (!parsed_method.ok()) {
+    return;
+  }
+  auto span_name = Format("rpc $0.$1", parsed_method->service, parsed_method->method);
+  span_ = dist_trace::StartServerSpan(span_name, *parent_context);
+  if (span_) {
+    span_->SetAttribute("rpc.system", "yb_rpc");
+    span_->SetAttribute("rpc.call_id", header_.call_id);
+  }
 }
 
 Status YBInboundCall::SerializeResponseBuffer(AnyMessageConstPtr response, bool is_success) {
@@ -425,12 +461,25 @@ Status YBInboundCall::ParseParam(RpcCallParams* params) {
 
 void YBInboundCall::RespondSuccess(AnyMessageConstPtr response) {
   TRACE_EVENT0("rpc", "InboundCall::RespondSuccess");
+  if (IsLocalCall()) {
+    if (span_) {
+      span_->SetStatus(opentelemetry::trace::StatusCode::kOk);
+    }
+    EndServerSpan();
+  }
   Respond(response, /*is_success=*/true);
 }
 
 void YBInboundCall::RespondFailure(ErrorStatusPB::RpcErrorCodePB error_code,
                                    const Status& status) {
   TRACE_EVENT0("rpc", "InboundCall::RespondFailure");
+
+  if (span_) {
+    span_->SetStatus(opentelemetry::trace::StatusCode::kError, status.ToUserMessage());
+  }
+  if (IsLocalCall()) {
+    EndServerSpan();
+  }
 
   // Release memory early and prevent building an oversized error response.
   sidecars_.Reset();
@@ -444,6 +493,13 @@ void YBInboundCall::RespondFailure(ErrorStatusPB::RpcErrorCodePB error_code,
 
 void YBInboundCall::RespondApplicationError(int error_ext_id, const std::string& message,
                                             const MessageLite& app_error_pb) {
+  if (span_) {
+    span_->SetStatus(opentelemetry::trace::StatusCode::kError, message);
+  }
+  if (IsLocalCall()) {
+    EndServerSpan();
+  }
+
   ErrorStatusPB err;
   ApplicationErrorToPB(error_ext_id, message, app_error_pb, &err);
   Respond(AnyMessageConstPtr(&err), /*is_success=*/false);
@@ -470,14 +526,31 @@ void YBInboundCall::Respond(AnyMessageConstPtr response, bool is_success) {
     if (is_success) {
       RespondFailure(ErrorStatusPB::ERROR_APPLICATION, s);
     } else {
+      if (span_) {
+        span_->SetStatus(opentelemetry::trace::StatusCode::kError, s.ToUserMessage());
+      }
+      EndServerSpan();
       LOG(DFATAL) << "Failed to serialize failure: " << s;
     }
     return;
   }
 
+  if (is_success && span_) {
+    span_->SetStatus(opentelemetry::trace::StatusCode::kOk);
+  }
+  EndServerSpan();
+
   TRACE_EVENT_ASYNC_END1("rpc", "InboundCall", this, "method", method_name().ToBuffer());
 
   QueueResponse(is_success);
+}
+
+void YBInboundCall::EndServerSpan() {
+  if (!span_) {
+    return;
+  }
+  auto span = std::move(span_);
+  span->End();
 }
 
 Slice YBInboundCall::method_name() const {

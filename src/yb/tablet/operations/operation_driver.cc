@@ -37,6 +37,7 @@
 #include <map>
 #include <memory>
 #include <mutex>
+#include <optional>
 #include <string>
 #include <vector>
 
@@ -406,6 +407,11 @@ void OperationDriver::ApplyTask(int64_t leader_term, OpIds* applied_op_ids) {
   ADOPT_TRACE(trace());
   ADOPT_WAIT_STATE(wait_state());
   SCOPED_WAIT_STATUS(OnCpu_Active);
+  dist_trace::ScopedAdoptSpan otel_scope(otel_parent_);
+  std::optional<dist_trace::ScopedSpan> otel_span;
+  if (operation_type() == OperationType::kWrite) {
+    otel_span.emplace("tablet.write.apply");
+  }
 
 #ifndef NDEBUG
   {

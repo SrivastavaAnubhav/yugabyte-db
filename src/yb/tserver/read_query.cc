@@ -43,6 +43,7 @@
 
 #include "yb/util/countdown_latch.h"
 #include "yb/util/debug/trace_event.h"
+#include "yb/util/dist_trace.h"
 #include "yb/util/flags.h"
 #include "yb/util/range.h"
 #include "yb/util/scope_exit.h"
@@ -125,9 +126,12 @@ class ReadQuery : public std::enable_shared_from_this<ReadQuery>, public rpc::Th
         req_(req),
         resp_(resp),
         context_(std::move(context)),
+        trace_parent_(),
         tablet_consensus_info_(nullptr) {}
 
   void Perform() {
+    dist_trace::ScopedAdoptSpan trace_scope(trace_parent_);
+    dist_trace::ScopedSpan trace_span("tserver.read");
     RespondIfFailed(DoPerform());
   }
 
@@ -196,6 +200,8 @@ class ReadQuery : public std::enable_shared_from_this<ReadQuery>, public rpc::Th
   // replica state lock for too long.
   // So ThreadPool is used to proceed with read.
   void Run() override {
+    dist_trace::ScopedAdoptSpan trace_scope(trace_parent_);
+    dist_trace::ScopedSpan trace_span("tserver.read.resume");
     auto status = PickReadTime(server_.Clock());
     if (status.ok()) {
       status = Complete();
@@ -213,6 +219,7 @@ class ReadQuery : public std::enable_shared_from_this<ReadQuery>, public rpc::Th
   const ReadRequestMsg* req_;
   ReadResponseMsg* resp_;
   rpc::RpcContext context_;
+  const dist_trace::TraceParent trace_parent_;
 
   std::shared_ptr<tablet::AbstractTablet> abstract_tablet_;
   // Leader tablet peer resolved for this read, populated progressively as the read path narrows it
@@ -732,6 +739,8 @@ void ReadQuery::InjectReadRestart(ReadRestartInfo* result) {
 }
 
 Result<ReadQuery::ReadRestartInfo> ReadQuery::DoReadImpl() {
+  dist_trace::ScopedSpan trace_span("tserver.read.execute");
+
   docdb::ReadOperationData read_operation_data = {
     .deadline = context_.GetClientDeadline(),
     .read_time = {},

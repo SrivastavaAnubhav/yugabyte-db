@@ -114,6 +114,7 @@
 
 #include "yb/util/debug-util.h"
 #include "yb/util/debug/trace_event.h"
+#include "yb/util/dist_trace.h"
 #include "yb/util/file_util.h"
 #include "yb/util/flag_validators.h"
 #include "yb/util/flags.h"
@@ -2375,6 +2376,7 @@ Status Tablet::HandlePgsqlReadRequest(
     const SubTransactionMetadataMsg& subtransaction_metadata,
     PgsqlReadRequestResult* result) {
 
+  dist_trace::ScopedSpan trace_span("tablet.read");
   TRACE(LogPrefix());
   auto scoped_read_operation = CreateScopedRWOperationNotBlockingRocksDbShutdownStart(
       read_operation_data.deadline);

@@ -260,6 +260,7 @@ WriteQuery::WriteQuery(
       deadline_(deadline),
       context_(context),
       rpc_context_(rpc_context),
+      trace_parent_(),
       response_(response),
       start_time_(MonoTime::Now()),
       execute_mode_(ExecuteMode::kSimple) {
@@ -289,6 +290,7 @@ std::unique_ptr<WriteOperation> WriteQuery::PrepareSubmit() {
 
 void WriteQuery::DoStartSynchronization(const Status& status) {
   std::unique_ptr<WriteQuery> self(this);
+  dist_trace::ScopedAdoptSpan trace_scope(trace_parent_);
   // Move submit_token_ so it is released after this function.
   ScopedRWOperation submit_token(std::move(submit_token_));
   // If a schema mismatch error occured, populate the response accordingly and return.
@@ -359,6 +361,11 @@ void WriteQuery::DoStartSynchronization(const Status& status) {
   TRACE_FUNC();
   ASH_ENABLE_CONCURRENT_UPDATES();
   SET_WAIT_STATUS(OnCpu_Passive);
+  DCHECK(!replicate_span_);
+  if (dist_trace::HasActiveContext()) {
+    replicate_span_ = dist_trace::StartSpan("tablet.write.replicate");
+  }
+  dist_trace::ScopedAdoptSpan replicate_scope(replicate_span_);
   context_->Submit(self.release()->PrepareSubmit(), term_);
   // Any further update to the wait-state for this RPC should happen based on
   // the state/transition of the submitted WriteOperation.
@@ -462,6 +469,16 @@ void WriteQuery::Cancel(const Status& status) {
 
 void WriteQuery::Complete(const Status& status) {
   Release();
+  if (replicate_span_) {
+    if (status.ok()) {
+      replicate_span_->SetStatus(opentelemetry::trace::StatusCode::kOk);
+    } else {
+      replicate_span_->SetStatus(
+          opentelemetry::trace::StatusCode::kError, status.ToUserMessage());
+    }
+    replicate_span_->End();
+    replicate_span_ = nullptr;
+  }
   InvokeCallback(status);
 }
 
@@ -749,6 +766,8 @@ Result<bool> WriteQuery::ExternalWritePrepareExecute() {
 void WriteQuery::Execute(std::unique_ptr<WriteQuery> query) {
   auto* query_ptr = query.get();
   query_ptr->self_ = std::move(query);
+  dist_trace::ScopedAdoptSpan trace_scope(query_ptr->trace_parent_);
+  dist_trace::ScopedSpan trace_span("tablet.write");
 
   auto prepare_result = query_ptr->PrepareExecute();
   VLOG_WITH_FUNC(4)
@@ -910,10 +929,13 @@ Status WriteQuery::DoExecute() {
   // Also it leads to deadlock if other operation will try to shut down RocksDB at this point.
   scoped_read_operation_.Reset();
   dockv::PartialRangeKeyIntents partial_range_key_intents(metadata.UsePartialRangeKeyIntents());
-  prepare_result_ = VERIFY_RESULT(docdb::PrepareDocWriteOperation(
-      doc_ops_, write_batch.read_pairs(), metrics_, isolation_level_, row_mark_type,
-      transactional_table, write_batch.has_transaction(), deadline(), partial_range_key_intents,
-      tablet->shared_lock_manager(), skip_prefix_locks));
+  {
+    dist_trace::ScopedSpan trace_span("tablet.write.prepare_locks");
+    prepare_result_ = VERIFY_RESULT(docdb::PrepareDocWriteOperation(
+        doc_ops_, write_batch.read_pairs(), metrics_, isolation_level_, row_mark_type,
+        transactional_table, write_batch.has_transaction(), deadline(), partial_range_key_intents,
+        tablet->shared_lock_manager(), skip_prefix_locks));
+  }
 
   scoped_read_operation_ = tablet->CreateScopedRWOperationNotBlockingRocksDbShutdownStart();
   RETURN_NOT_OK(scoped_read_operation_);
@@ -1082,6 +1104,9 @@ Status WriteQuery::PickReadTimeIfNecessary() {
 }
 
 void WriteQuery::CompleteExecute() {
+  dist_trace::ScopedAdoptSpan trace_scope(trace_parent_);
+  dist_trace::ScopedSpan trace_span("tablet.write.assemble");
+
   ExecuteDone(DoCompleteExecute());
 }
 

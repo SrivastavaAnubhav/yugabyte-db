@@ -41,6 +41,7 @@
 
 #include "yb/util/debug-util.h"
 #include "yb/util/debug/trace_event.h"
+#include "yb/util/dist_trace.h"
 #include "yb/util/flags.h"
 #include "yb/util/sync_point.h"
 #include "yb/util/trace.h"
@@ -94,6 +95,8 @@ void WriteOperation::SubmittedToLeaderQueue() {
 }
 
 Status WriteOperation::ApplyOperation(int64_t leader_term, bool skip_opid_update) {
+  dist_trace::ScopedSpan trace_span("tablet.write.storage_apply");
+
   TRACE_EVENT0("txn", "WriteOperation::Complete");
   TRACE("APPLY: Starting");
 

@@ -70,6 +70,7 @@
 #include "yb/util/algorithm_util.h"
 #include "yb/util/debug.h"
 #include "yb/util/debug-util.h"
+#include "yb/util/dist_trace.h"
 #include "yb/util/enums.h"
 #include "yb/util/flags.h"
 #include "yb/util/logging.h"
@@ -2234,6 +2235,8 @@ class PgsqlReadRequestYbctidProvider {
 };
 
 Result<size_t> PgsqlReadOperation::Execute() {
+  dist_trace::ScopedSpan trace_span("docdb.pgsql_read");
+
   // Verify that this request references no columns marked for deletion.
   RETURN_NOT_OK(VerifyNoRefColsMarkedForDeletion(data_.doc_read_context.schema(), request_));
   size_t fetched_rows = 0;
@@ -2811,6 +2814,8 @@ void PgsqlReadOperation::BindReadTimeToPagingState(const ReadHybridTime& read_ti
 }
 
 Result<std::tuple<size_t, bool>> PgsqlReadOperation::ExecuteScalar() {
+  dist_trace::ScopedSpan trace_span("docdb.pgsql_read.scalar");
+
   // Requests normally have a limit on how many rows to return
   auto row_count_limit = std::numeric_limits<std::size_t>::max();
   if (request_.has_limit() && request_.limit() > 0) {

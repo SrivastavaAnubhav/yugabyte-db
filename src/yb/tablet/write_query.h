@@ -29,6 +29,7 @@
 
 #include "yb/tserver/tserver_fwd.h"
 
+#include "yb/util/dist_trace.h"
 #include "yb/util/operation_counter.h"
 
 namespace yb {
@@ -228,6 +229,8 @@ class WriteQuery {
   const CoarseTimePoint deadline_;
   WriteQueryContext* const context_;
   rpc::RpcContext* const rpc_context_;
+  const dist_trace::TraceParent trace_parent_;
+  dist_trace::nostd::shared_ptr<dist_trace::trace::Span> replicate_span_;
 
   // Pointers to the rpc context, request and response, lifecycle
   // is managed by the rpc subsystem. These pointers maybe nullptr if the
